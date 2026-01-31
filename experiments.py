@@ -51,14 +51,13 @@ import svgwrite
 # Symmetric difference (XOR) fill: keep regions with even overlap count (0, 2, 4...).
 # Option A: extract from drawing (draw first).
 # Option B: pass Shapely polygons directly (if grid has get_shapely_polygons): symmetric_difference(drawing_global, polygons=honeycomb.get_shapely_polygons())
-if __name__ == '__main__':
-    honeycomb_hexagon = Polygon(6, 6.0)
-    honeycomb = GridIsometric(12, 50, 50, honeycomb_hexagon)
-    honeycomb.modify_polygons(circle_morph, magnitude=0.75, decrease_out=True)
-    honeycomb.draw_polygons()
-    honeycomb.draw_outlines(5)
-    symmetric_difference_parallel(drawing_global)
-    drawing_global.save()
+honeycomb_hexagon = Polygon(6, 6.0)
+honeycomb = GridIsometric(12, 50, 50, honeycomb_hexagon)
+honeycomb.modify_polygons(circle_morph, magnitude=0.75, decrease_out=True)
+honeycomb.draw_polygons()
+honeycomb.draw_outlines(5)
+symmetric_difference_parallel(drawing_global)
+drawing_global.save()
 
 # # --- Two overlapping hexagons: planar arrangement (non-overlapping regions) ---
 # hexagon_radius = 40

@@ -2,7 +2,7 @@ import svgwrite
 import math
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 try:
@@ -782,7 +782,8 @@ def fracture(
 def _iterative_symmetric_difference_chunk(polygon_list):
     """
     Worker for parallel symmetric_difference: compute iterative XOR for one chunk of
-    Shapely polygons. Must be module-level for ProcessPoolExecutor pickling.
+    Shapely polygons. Used from ThreadPoolExecutor (threads, not processes) so no
+    pickling or if __name__ == '__main__' guard is needed in the caller.
     Returns a single Shapely geometry or None if polygon_list is empty.
     """
     if not polygon_list:
@@ -855,8 +856,9 @@ def symmetric_difference_parallel(
 ) -> svgwrite.Drawing:
     """
     Same as symmetric_difference (XOR fill) but uses parallel iterative XOR: chunk polygons
-    across CPU workers, each worker does iterative symmetric_difference on its chunk, then
-    main process combines partial results. Use when symmetric_difference_all is slow or unavailable.
+    across threads, each thread does iterative symmetric_difference on its chunk, then the
+    main thread combines partial results. Uses threads (not processes) so callers do not need
+    if __name__ == '__main__'. GEOS typically releases the GIL during work, so threads can run in parallel.
     Same signature as symmetric_difference; modifies the drawing in place.
     """
     if not SHAPELY_AVAILABLE:
@@ -890,7 +892,7 @@ def symmetric_difference_parallel(
             [shapely_polys[index] for index in range(worker_index, len(shapely_polys), max_workers)]
             for worker_index in range(max_workers)
         ]
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             partial_results = list(executor.map(_iterative_symmetric_difference_chunk, chunks))
         result = None
         for partial in partial_results:
