@@ -2,13 +2,14 @@ import svgwrite
 import math
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 from typing import List
 
 try:
     from shapely.geometry import Polygon as ShapelyPolygon
     from shapely.ops import unary_union
     try:
-        from shapely import symmetric_difference_all  # Batch XOR; deprecated in 2.1+, may be removed
+        from shapely import symmetric_difference_all
     except ImportError:
         symmetric_difference_all = None
     SHAPELY_AVAILABLE = True
@@ -778,18 +779,27 @@ def fracture(
     return drawing
 
 
+def _iterative_symmetric_difference_chunk(polygon_list):
+    """
+    Worker for parallel symmetric_difference: compute iterative XOR for one chunk of
+    Shapely polygons. Must be module-level for ProcessPoolExecutor pickling.
+    Returns a single Shapely geometry or None if polygon_list is empty.
+    """
+    if not polygon_list:
+        return None
+    result = polygon_list[0]
+    for current_polygon in polygon_list[1:]:
+        result = result.symmetric_difference(current_polygon)
+    return result
+
+
 def symmetric_difference(
     drawing: svgwrite.Drawing, polygons=None
 ) -> svgwrite.Drawing:
     """
-    Symmetric difference (XOR) fill: keep regions with an *even* number of overlaps (0, 2, 4...),
-    drop regions with odd overlaps (1, 3, 5...). Equivalent to the boolean symmetric_difference
-    of the input polygons (region is kept iff it lies in an odd number of inputs).
-    A region = one contiguous polygon; we keep those in an odd number of input shapes.
-    Overlaps = (number of shapes covering the region) - 1. E.g. two overlapping hexagons:
-    outer parts (0 overlaps) kept; inner overlap (1 overlap) not drawn.
-    Approach: get polygon lists, convert to Shapely, then iteratively apply symmetric_difference
-    (poly0 XOR poly1 XOR poly2 ...); flatten the result to regions and draw them.
+    Symmetric difference (XOR) fill: keep regions in an odd number of input shapes.
+    Uses Shapely's symmetric_difference_all(geometries) when available (one batch op);
+    otherwise falls back to sequential iterative XOR.
     Either pass a list of Shapely Polygons (e.g. grid.get_shapely_polygons())
     or leave polygons=None to extract from the drawing. Modifies the drawing in place.
     """
@@ -816,8 +826,14 @@ def symmetric_difference(
         return drawing
 
     t0 = time.perf_counter()
-    result = symmetric_difference_all(shapely_polys)
-    print(f"[timer] symmetric_difference — symmetric_difference_all(geoms): {time.perf_counter() - t0:.4f} s")
+    if symmetric_difference_all is not None:
+        result = symmetric_difference_all(shapely_polys)
+    else:
+        result = _iterative_symmetric_difference_chunk(shapely_polys)
+    print(f"[timer] symmetric_difference — XOR (batch or sequential): {time.perf_counter() - t0:.4f} s")
+
+    if result is None or (hasattr(result, "is_empty") and result.is_empty):
+        return drawing
 
     t0 = time.perf_counter()
     regions = [
@@ -831,4 +847,70 @@ def symmetric_difference(
     print(f"[timer] symmetric_difference — _draw_regions: {time.perf_counter() - t0:.4f} s")
 
     print(f"[timer] symmetric_difference (total): {time.perf_counter() - start_time:.4f} s")
+    return drawing
+
+
+def symmetric_difference_parallel(
+    drawing: svgwrite.Drawing, polygons=None
+) -> svgwrite.Drawing:
+    """
+    Same as symmetric_difference (XOR fill) but uses parallel iterative XOR: chunk polygons
+    across CPU workers, each worker does iterative symmetric_difference on its chunk, then
+    main process combines partial results. Use when symmetric_difference_all is slow or unavailable.
+    Same signature as symmetric_difference; modifies the drawing in place.
+    """
+    if not SHAPELY_AVAILABLE:
+        raise ImportError("symmetric_difference_parallel requires Shapely: pip install shapely")
+
+    start_time = time.perf_counter()
+
+    t0 = time.perf_counter()
+    if polygons is not None:
+        points_lists = _shapely_polygons_to_points_lists(polygons)
+    else:
+        points_lists = _polygon_points_from_drawing(drawing)
+    print(f"[timer] symmetric_difference_parallel — get points_lists: {time.perf_counter() - t0:.4f} s")
+
+    if not points_lists:
+        return drawing
+
+    t0 = time.perf_counter()
+    shapely_polys = _points_lists_to_shapely_polys(points_lists)
+    print(f"[timer] symmetric_difference_parallel — points_lists → Shapely polys: {time.perf_counter() - t0:.4f} s")
+
+    if not shapely_polys:
+        return drawing
+
+    t0 = time.perf_counter()
+    max_workers = min(os.cpu_count() or 4, len(shapely_polys))
+    if max_workers <= 1:
+        result = _iterative_symmetric_difference_chunk(shapely_polys)
+    else:
+        chunks = [
+            [shapely_polys[index] for index in range(worker_index, len(shapely_polys), max_workers)]
+            for worker_index in range(max_workers)
+        ]
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            partial_results = list(executor.map(_iterative_symmetric_difference_chunk, chunks))
+        result = None
+        for partial in partial_results:
+            if partial is not None:
+                result = partial if result is None else result.symmetric_difference(partial)
+    print(f"[timer] symmetric_difference_parallel — parallel iterative XOR: {time.perf_counter() - t0:.4f} s")
+
+    if result is None:
+        return drawing
+
+    t0 = time.perf_counter()
+    regions = [
+        region for region in _to_polygon_list(result)
+        if not region.is_empty and region.area > _MIN_REGION_AREA
+    ]
+    print(f"[timer] symmetric_difference_parallel — result → regions list: {time.perf_counter() - t0:.4f} s")
+
+    t0 = time.perf_counter()
+    _draw_regions(drawing, regions)
+    print(f"[timer] symmetric_difference_parallel — _draw_regions: {time.perf_counter() - t0:.4f} s")
+
+    print(f"[timer] symmetric_difference_parallel (total): {time.perf_counter() - start_time:.4f} s")
     return drawing
