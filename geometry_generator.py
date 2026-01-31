@@ -450,6 +450,45 @@ class EdgeMandala:
             new_layer.append(vertices)
         self.layers.append(new_layer)
 
+    def generate_outer_layer(self, num_points=None):
+        """
+        Add one new layer using only the *outermost* outer edges of the previous layer:
+        edges whose distance from the layer centroid is maximum. If several edges tie
+        for that maximum distance, all of them get a new polygon (same as generate_layer
+        but filtered to farthest edges only).
+        num_points: number of vertices for each new polygon; if None, uses seed num_points.
+        """
+        last_layer = self.layers[-1]
+        outer_edges, interior_point = self._outer_edges_and_centroid(last_layer)
+        if not outer_edges or interior_point is None:
+            return
+        cx, cy = interior_point[0], interior_point[1]
+        max_dist_sq = -1.0
+        for (start, end) in outer_edges:
+            mx = (start[0] + end[0]) / 2
+            my = (start[1] + end[1]) / 2
+            d_sq = (cx - mx) ** 2 + (cy - my) ** 2
+            if d_sq > max_dist_sq:
+                max_dist_sq = d_sq
+        if max_dist_sq < 0:
+            return
+        tol = 1e-9 * max(max_dist_sq, 1.0)
+        outermost = []
+        for (start, end) in outer_edges:
+            mx = (start[0] + end[0]) / 2
+            my = (start[1] + end[1]) / 2
+            d_sq = (cx - mx) ** 2 + (cy - my) ** 2
+            if abs(d_sq - max_dist_sq) <= tol:
+                outermost.append((start, end))
+        if not outermost:
+            return
+        n_pts = num_points if num_points is not None else self.seed_polygon.num_points
+        new_layer = []
+        for (start, end) in outermost:
+            vertices = self.generate_edge_polygon((start, end), n_pts, interior_point=interior_point)
+            new_layer.append(vertices)
+        self.layers.append(new_layer)
+
     def generate_layers(self, n_or_num_points):
         """
         Add new layers (polygons on outer edges of the previous layer).

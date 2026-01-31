@@ -79,10 +79,9 @@ import svgwrite
 # --- EdgeMandala: pentagon seed, 3 layers (each layer = polygons on outer edges of previous) ---
 seed_pentagon = Polygon(5, 30, [200, 200], drawing_global, 0)
 edge_mandala = EdgeMandala(seed_pentagon)
-edge_mandala.generate_layer(4)
-edge_mandala.generate_layer(3)
-edge_mandala.generate_layer(5)
-
+edge_mandala.generate_outer_layer(4)
+edge_mandala.generate_outer_layer(5)
+edge_mandala.generate_layers([5, 5, 5, 5])
 edge_mandala.draw_layers()
-# symmetric_difference_parallel(drawing_global)
+symmetric_difference_parallel(drawing_global)
 drawing_global.save()
