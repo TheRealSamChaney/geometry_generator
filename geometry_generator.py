@@ -2,6 +2,7 @@ import svgwrite
 import math
 import os
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
@@ -382,63 +383,150 @@ class Mandala: # TODO consider making this inherit from Grid class
         self._center = center
         self.points = self.points()
         
-class EdgeMandala: # TODO figure this shit out
-    # To determine orientation of line segment AB with respect to origin C, use dot product of AC and BC. I think you can also use the cross product
-    # This function should have an initial seed polygon, then you can make layers from it. Each layer will be the full set of polygons connected to all outside edges from the previous layer
-    def __init__(self,  seed_polygon):
+def _polygon_points(item):
+    """Return list of [x,y] for a layer item (Polygon or list of points)."""
+    if hasattr(item, "points"):
+        return list(item.points)
+    return list(item)
+
+
+def _canonical_edge(p1, p2, ndigits=6):
+    """Normalize edge so (a,b) and (b,a) compare equal for counting."""
+    a = (round(float(p1[0]), ndigits), round(float(p1[1]), ndigits))
+    b = (round(float(p2[0]), ndigits), round(float(p2[1]), ndigits))
+    return (min(a, b), max(a, b))
+
+
+class EdgeMandala:
+    """
+    Builds layers of polygons: each new layer has one polygon per *outer* edge of
+    the previous layer. The new polygon shares that edge (same two vertices) and
+    is placed on the outside (away from the mandala center).
+    """
+    def __init__(self, seed_polygon):
         self._seed_polygon = seed_polygon
-        self.layers = [[self.seed_polygon]] # Start layers list off with seed polygon as the first layer
-        
-    def generate_edge_polygon(self, edge, num_points):
-        start = edge[0]
-        end = edge[1]
-        return create_edge_polygon(start, end, num_points)
-    
-    def generate_layer(self):
-        # Create 1 "layer" of polygons which is a full set of polygons connected to all the outside edges of the previous layer starting with the seed polygon
+        self.layers = [[self.seed_polygon]]
+
+    def generate_edge_polygon(self, edge, num_points, interior_point=None):
+        start, end = edge[0], edge[1]
+        return create_edge_polygon(start, end, num_points, interior_point=interior_point)
+
+    def _outer_edges_and_centroid(self, layer):
+        """Collect all edges from the layer, count occurrences; return outer edges and centroid."""
+        edge_counts = Counter()
+        edge_to_endpoints = {}  # canonical -> (start, end) as lists
+        all_x, all_y, total = 0.0, 0.0, 0
+        for item in layer:
+            pts = _polygon_points(item)
+            n = len(pts)
+            for idx in range(n):
+                p1 = pts[idx]
+                p2 = pts[(idx + 1) % n]
+                key = _canonical_edge(p1, p2)
+                edge_counts[key] += 1
+                edge_to_endpoints[key] = ([float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])])
+            for p in pts:
+                all_x += p[0]
+                all_y += p[1]
+                total += 1
+        centroid = [all_x / total, all_y / total] if total else None
+        outer = [edge_to_endpoints[k] for k in edge_counts if edge_counts[k] == 1]
+        return outer, centroid
+
+    def generate_layer(self, num_points=None):
+        """
+        Add one new layer: a polygon on each outer edge of the previous layer (shared edge, outward).
+        num_points: number of vertices for each new polygon in this layer (e.g. 3 = triangles).
+        If None, uses the seed polygon's num_points.
+        """
         last_layer = self.layers[-1]
-    
+        outer_edges, interior_point = self._outer_edges_and_centroid(last_layer)
+        if not outer_edges:
+            return
+        n_pts = num_points if num_points is not None else self.seed_polygon.num_points
+        new_layer = []
+        for (start, end) in outer_edges:
+            vertices = self.generate_edge_polygon((start, end), n_pts, interior_point=interior_point)
+            new_layer.append(vertices)
+        self.layers.append(new_layer)
+
+    def generate_layers(self, n_or_num_points):
+        """
+        Add new layers (polygons on outer edges of the previous layer).
+        n_or_num_points: int or list of ints.
+          - int n: add n layers, each using the seed polygon's num_points.
+          - list of ints: add len(list) layers; layer i uses list[i] as num_points (e.g. [3, 4, 5] = triangles, then quads, then pentagons).
+        """
+        if isinstance(n_or_num_points, list):
+            for num_points in n_or_num_points:
+                self.generate_layer(num_points=num_points)
+        else:
+            for _ in range(n_or_num_points):
+                self.generate_layer()
+
+    def draw_layers(self, drawing=None):
+        """Draw all layers to the given drawing (default: seed_polygon's drawing)."""
+        drawing = drawing or getattr(self.seed_polygon, "drawing", None)
+        if drawing is None:
+            return
+        for layer in self.layers:
+            for item in layer:
+                pts = _polygon_points(item)
+                if len(pts) >= 3:
+                    drawing.add(drawing.polygon(pts))
+
     @property
     def seed_polygon(self):
         return self._seed_polygon
-    
+
     @seed_polygon.setter
     def seed_polygon(self, polygon):
         self._seed_polygon = polygon
         
     
-def create_edge_polygon(start, end, num_vertices): # ChatGPT, this one doesn't know which side of the line to make the polygon on
-    # Calculate the length of the line segment
-    line_length = math.sqrt((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2)
-    
-    # Calculate the angle between each vertex
-    angle = 2 * math.pi / num_vertices
-    
-    # Calculate the x and y increments for each vertex
-    x_increment = line_length * math.cos(angle)
-    y_increment = line_length * math.sin(angle)
-    
-    # Calculate the slope and y-intercept of the line segment
-    slope = (end[1] - start[1]) / (end[0] - start[0])
-    y_intercept = start[1] - slope * start[0]
-    
-    # Initialize the starting x and y coordinates
-    x = start[0] + line_length / 2
-    y = slope * x + y_intercept
-    
-    # Initialize an empty list to store the vertex coordinates
+def create_edge_polygon(start, end, num_vertices, interior_point=None):
+    """
+    Create a regular polygon that has (start, end) as one shared edge.
+    The polygon is placed on the side of the edge opposite to interior_point
+    (so for a mandala, interior_point is the center and the new polygon goes outward).
+    Returns list of [x, y] vertices: [start, end, ...] so the edge is shared.
+    """
+    start = [float(start[0]), float(start[1])]
+    end = [float(end[0]), float(end[1])]
+    if num_vertices < 3:
+        return [start, end]
+    ex = end[0] - start[0]
+    ey = end[1] - start[1]
+    line_length = math.sqrt(ex * ex + ey * ey)
+    if line_length < 1e-10:
+        return [start, end]
+    # Perpendicular unit vector (one of the two sides).
+    px = -ey / line_length
+    py = ex / line_length
+    midpoint = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2]
+    # Choose side: polygon center on the side opposite to interior_point.
+    if interior_point is not None:
+        dx = interior_point[0] - midpoint[0]
+        dy = interior_point[1] - midpoint[1]
+        if dx * px + dy * py > 0:
+            px, py = -px, -py
+    # For a regular n-gon with one edge of length L: circumradius R = L / (2*sin(pi/n)),
+    # distance from edge midpoint to center = R*cos(pi/n) = L/(2*tan(pi/n)).
+    n = num_vertices
+    half_tan = math.tan(math.pi / n)
+    dist_to_center = line_length / (2 * half_tan) if half_tan > 1e-10 else 0
+    center = [midpoint[0] + px * dist_to_center, midpoint[1] + py * dist_to_center]
+    # Circumradius so that start and end lie on the circle.
+    R = line_length / (2 * math.sin(math.pi / n)) if n > 0 else 0
+    # Angle from center to start.
+    angle0 = math.atan2(start[1] - center[1], start[0] - center[0])
+    angle_step = 2 * math.pi / n
     vertices = []
-    
-    # Iterate through each vertex, calculating its coordinates
-    for i in range(num_vertices):
-        vertices.append((x, y))
-        # Rotate the line segment by the angle to get the coordinates of the next vertex
-        x, y = (x * math.cos(angle) - y * math.sin(angle),
-                x * math.sin(angle) + y * math.cos(angle))
-        # Add the x and y increments to get the coordinates of the next vertex
-        x += x_increment
-        y += y_increment
-    
+    for k in range(n):
+        angle = angle0 + k * angle_step
+        x = center[0] + R * math.cos(angle)
+        y = center[1] + R * math.sin(angle)
+        vertices.append([x, y])
     return vertices
     
 def radius_morph_polygon_center(grid, polygon:Polygon, i:int, j:int, magnitude):
@@ -457,9 +545,37 @@ def circle_morph(grid:GridIsometric, polygon:Polygon, i:int, j:int, magnitude:fl
     if decrease_out: polygon.radius -= difference*normalize*magnitude
     else: polygon.radius = 0 + difference*normalize*magnitude
         
-def ripple_morph(grid:GridIsometric, polygon:Polygon, i:int, j:int, magnitude:float, decrease_out:bool = True):
-    # TODO implement this, similar to cirlce_morph but effect waxes and wanes according to sine function
-    pass
+def ripple_morph(
+    grid: GridIsometric,
+    polygon: Polygon,
+    i: int,
+    j: int,
+    magnitude: float,
+    decrease_out: bool = True,
+    num_waves: float = 5.0,
+    decay_rate: float = 1.5,
+):
+    """
+    Morph polygon radius by a sine (water-ripple) effect: oscillation with fixed spatial
+    frequency, and decay so amplitude shrinks with distance from grid center.
+    Same signature pattern as circle_morph; optional num_waves (ripple cycles from center to edge)
+    and decay_rate (how fast amplitude falls off with distance).
+    """
+    center = grid.center_polygon().center
+    max_distance = grid.max_distance(center)
+    distance = math.sqrt(
+        (center[0] - polygon.center[0]) ** 2 + (center[1] - polygon.center[1]) ** 2
+    )
+    # Phase: num_waves full cycles from center to max_distance (frequency constant in space).
+    phase = 2 * math.pi * num_waves * distance / max_distance if max_distance > 0 else 0
+    # Decay: amplitude falls off with distance (1 at center, smaller toward edge).
+    decay_factor = math.exp(-decay_rate * distance / max_distance) if max_distance > 0 else 1.0
+    # Amplitude on the order of radius*magnitude (like circle_morph) so the ripple is visible.
+    ripple = magnitude * polygon.radius * math.sin(phase) * decay_factor * 0.5
+    if decrease_out:
+        polygon.radius -= ripple
+    else:
+        polygon.radius += ripple
         
 def radius_morph_2(grid, polygon:Polygon, i:int, j:int):
     center_x = (grid.num_x - 1)/2

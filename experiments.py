@@ -51,13 +51,14 @@ import svgwrite
 # Symmetric difference (XOR) fill: keep regions with even overlap count (0, 2, 4...).
 # Option A: extract from drawing (draw first).
 # Option B: pass Shapely polygons directly (if grid has get_shapely_polygons): symmetric_difference(drawing_global, polygons=honeycomb.get_shapely_polygons())
-honeycomb_hexagon = Polygon(6, 6.0)
-honeycomb = GridIsometric(12, 50, 50, honeycomb_hexagon)
-honeycomb.modify_polygons(circle_morph, magnitude=0.75, decrease_out=True)
-honeycomb.draw_polygons()
-honeycomb.draw_outlines(5)
-symmetric_difference_parallel(drawing_global)
-drawing_global.save()
+# honeycomb_hexagon = Polygon(6, 6.0)
+# honeycomb = GridIsometric(12, 30, 30, honeycomb_hexagon)
+# # honeycomb.modify_polygons(circle_morph, magnitude=0.75, decrease_out=True)
+# honeycomb.modify_polygons(ripple_morph, magnitude=0.3, num_waves=3, decrease_out=True)
+# honeycomb.draw_polygons()
+# honeycomb.draw_outlines(5)
+# symmetric_difference_parallel(drawing_global)
+# drawing_global.save()
 
 # # --- Two overlapping hexagons: planar arrangement (non-overlapping regions) ---
 # hexagon_radius = 40
@@ -74,3 +75,14 @@ drawing_global.save()
 # hex2 = Polygon(6, hexagon_radius, [100, 80], drawing_global, 0)
 # symmetric_difference(drawing_global, polygons=[hex1.shapely_polygon, hex2.shapely_polygon])
 # drawing_global.save()
+
+# --- EdgeMandala: pentagon seed, 3 layers (each layer = polygons on outer edges of previous) ---
+seed_pentagon = Polygon(5, 30, [200, 200], drawing_global, 0)
+edge_mandala = EdgeMandala(seed_pentagon)
+edge_mandala.generate_layer(4)
+edge_mandala.generate_layer(3)
+edge_mandala.generate_layer(5)
+
+edge_mandala.draw_layers()
+# symmetric_difference_parallel(drawing_global)
+drawing_global.save()
