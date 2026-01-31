@@ -1,22 +1,22 @@
 from geometry_generator import *
 import svgwrite
 
-triangle = Polygon(3, 10)
+# triangle = Polygon(3, 10)
 
-pentagon = Polygon(5, 40)
+# pentagon = Polygon(5, 40)
 
-hexagon = Polygon(6,40)
+# hexagon = Polygon(6,40)
 
-fractal_polygon_radius = 70
-fractal_polygon = Polygon(4, fractal_polygon_radius, [0, 0], drawing_global, 0)
-shrinkage = .5
+# fractal_polygon_radius = 70
+# fractal_polygon = Polygon(4, fractal_polygon_radius, [0, 0], drawing_global, 0)
+# shrinkage = .5
 
 # fractal_points_1 = fractal_polygon.draw_fractal(shrinkage, 7, 360/16)
 
 # print(fractal_polygon.draw_fractal(shrinkage, 7, 0))
 
 # fractal_grid = Grid(fractal_polygon_radius*1,1, 6, fractal_polygon)
-fractal_grid = GridIsometric(fractal_polygon_radius*(2+(1/8)),1, 6, fractal_polygon, True)
+# fractal_grid = GridIsometric(fractal_polygon_radius*(2+(1/8)),1, 6, fractal_polygon, True)
 # fractal_grid.modify_polygons(lambda grid, polygon, i, j: polygon.draw_fractal(shrinkage, 4, 0))
 # fractal_grid.draw_polygons()
 
@@ -27,12 +27,8 @@ fractal_grid = GridIsometric(fractal_polygon_radius*(2+(1/8)),1, 6, fractal_poly
 # mandala.draw_polygons()
 
 honeycomb_hexagon = Polygon(6, 6.0)
-honeycomb = GridIsometric(12, 19, 67, honeycomb_hexagon)
-# honeycomb.modify_polygons(radius_morph_polygon_center, magnitude = 0.3)
-honeycomb.modify_polygons(circle_morph, magnitude = 0.75, decrease_out = True)
-# honeycomb.modify_polygons(linear_gradient, magnitude = 1.0, angle = 30, decrease_out = True)
-# honeycomb.draw_polygons()
-# honeycomb.draw_outlines(5)
+honeycomb = GridIsometric(12, 20, 20, honeycomb_hexagon)
+honeycomb.modify_polygons(circle_morph, magnitude=0.75, decrease_out=True)
 
 # for i in range(4):
 #     honeycomb.modify_polygons(linear_gradient, magnitude = 0.7, angle = 45+10*i, decrease_out = True)
@@ -52,8 +48,30 @@ honeycomb.modify_polygons(circle_morph, magnitude = 0.75, decrease_out = True)
 #     temp_mandala.draw_polygons()
 
 
-pentagon.draw()
+# pentagon.draw()
 
-print(drawing_global.tostring())
+# print(drawing_global.tostring())
 
+# Symmetric difference (XOR) fill: keep regions with even overlap count (0, 2, 4...).
+# Option A: extract from drawing (draw first).
+honeycomb.draw_polygons()
+honeycomb.draw_outlines(5)
+symmetric_difference(drawing_global)
+# Option B: pass Shapely polygons directly (if grid has get_shapely_polygons): symmetric_difference(drawing_global, polygons=honeycomb.get_shapely_polygons())
 drawing_global.save()
+
+# # --- Two overlapping hexagons: planar arrangement (non-overlapping regions) ---
+# hexagon_radius = 40
+# hex1 = Polygon(6, hexagon_radius, [60, 80], drawing_global, 0)
+# hex2 = Polygon(6, hexagon_radius, [100, 80], drawing_global, 0)
+# hex1.draw()
+# hex2.draw()
+# fracture(drawing_global, polygons=[hex1.shapely_polygon, hex2.shapely_polygon])
+# drawing_global.save()
+
+# # --- Two overlapping hexagons: symmetric difference (XOR) ---
+# hexagon_radius = 40
+# hex1 = Polygon(6, hexagon_radius, [60, 80], drawing_global, 0)
+# hex2 = Polygon(6, hexagon_radius, [100, 80], drawing_global, 0)
+# symmetric_difference(drawing_global, polygons=[hex1.shapely_polygon, hex2.shapely_polygon])
+# drawing_global.save()

@@ -1,14 +1,27 @@
 import svgwrite
 import math
 import os
+import time
 from typing import List
+
+try:
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.ops import unary_union
+    try:
+        from shapely import symmetric_difference_all  # Batch XOR; deprecated in 2.1+, may be removed
+    except ImportError:
+        symmetric_difference_all = None
+    SHAPELY_AVAILABLE = True
+except ImportError:
+    SHAPELY_AVAILABLE = False
+    symmetric_difference_all = None
 
 # This will be a SVG geometric pattern creator app
 
 width = 100
 height = 400
  
-output_folder = "G:\My Drive\Design and 3D Printing Laser\Laser Cutting Engraving\Lightburn Inkscape Vector Graphics"
+output_folder = os.path.dirname(os.path.abspath(__file__))
 output_filename = "geometry_generator_output.svg"
 output_path = os.path.join(output_folder, output_filename)
 drawing_global = svgwrite.Drawing(output_path)
@@ -237,8 +250,8 @@ class GridIsometric(Grid):
         self._polygon = polygon
         self._origin = origin
         self.drawing = drawing
+        self.points = self._grid()
         if symmetric: self._grid_symmetric()
-        else: self.grid()
         self.polygons = self._generate_polygons()
         self.polygon_points = self._polygon_points()
         
@@ -471,3 +484,351 @@ def linear_gradient(grid:GridIsometric, polygon:Polygon, i:int, j:int,magnitude:
     normalize = polygon.radius / max_distance
     if decrease_out: polygon.radius -= distance*normalize*magnitude
     else:polygon.radius = 0 + distance*normalize*magnitude
+
+
+# Minimum area for a region to be kept (avoids degenerate slivers from floating point).
+_MIN_REGION_AREA = 1e-10
+
+
+def _polygon_points_from_drawing(drawing: svgwrite.Drawing) -> List[List[List[float]]]:
+    """
+    Extract polygon vertex lists from an svgwrite Drawing.
+    Returns a list of polygons; each polygon = list of [x, y] vertex coordinates.
+    Approach: get the drawing as XML, iterate over every element, find <polygon> nodes,
+    parse the "points" attribute into numbers, and build [x,y] pairs for each polygon.
+    """
+    start_time = time.perf_counter()
+    # List of polygons; each polygon is a list of [x, y] points (vertices).
+    all_polygon_vertices = []
+    drawing_xml_root = drawing.get_xml()
+    for element in drawing_xml_root.iter():
+        # Handle SVG namespace: tag may be "polygon" or "{uri}polygon".
+        tag_name = element.tag.split("}")[-1] if "}" in element.tag else element.tag
+        if tag_name != "polygon":
+            continue
+        # SVG polygon has a "points" attribute: "x1,y1 x2,y2 x3,y3 ..."
+        points_attr = element.get("points")
+        if not points_attr:
+            continue
+        # Parse into floats: split on space and comma, then take pairs as x,y.
+        flat_numbers = []
+        for token in points_attr.strip().replace(",", " ").split():
+            try:
+                flat_numbers.append(float(token))
+            except ValueError:
+                continue
+        # Need at least 3 vertices (6 numbers) and an even count for x,y pairs.
+        if len(flat_numbers) >= 6 and len(flat_numbers) % 2 == 0:
+            vertex_list = [
+                [flat_numbers[index], flat_numbers[index + 1]]
+                for index in range(0, len(flat_numbers), 2)
+            ]
+            all_polygon_vertices.append(vertex_list)
+    elapsed = time.perf_counter() - start_time
+    print(f"[timer] _polygon_points_from_drawing: {elapsed:.4f} s")
+    return all_polygon_vertices
+
+
+def _to_polygon_list(geometry):
+    """
+    Flatten a Shapely geometry into a list of Polygon(s).
+    A region = one Shapely Polygon (no overlaps). MultiPolygon/Collection become multiple items.
+    Approach: check geometry type; if Polygon return it as a single-element list;
+    if MultiPolygon, collect each sub-polygon; if GeometryCollection, recurse into each part.
+    """
+    if geometry is None or geometry.is_empty:
+        return []
+    if geometry.geom_type == "Polygon":
+        return [geometry]
+    if geometry.geom_type == "MultiPolygon":
+        return [single_polygon for single_polygon in geometry.geoms if not single_polygon.is_empty]
+    if geometry.geom_type == "GeometryCollection":
+        polygons_out = []
+        for sub_geometry in geometry.geoms:
+            polygons_out.extend(_to_polygon_list(sub_geometry))
+        return polygons_out
+    return []
+
+
+def _shapely_polygons_to_points_lists(shapely_polygons):
+    """
+    Convert a list of Shapely Polygons into points_lists (list of vertex lists).
+    Each item = one polygon as [[x,y], [x,y], ...]. Used when we have Shapely
+    polygons in memory (e.g. from a grid) and need to pass them into arrangement builders.
+    Approach: loop through each Shapely polygon, read its exterior ring coordinates,
+    and build a vertex list [x,y] for each; skip empty or degenerate polygons.
+    """
+    start_time = time.perf_counter()
+    points_lists = []
+    for polygon in shapely_polygons:
+        if polygon is None or polygon.is_empty:
+            continue
+        # Exterior ring: closed sequence of (x, y) coordinates.
+        exterior_coords = list(polygon.exterior.coords)
+        if len(exterior_coords) < 3:
+            continue
+        vertex_list = [[float(point[0]), float(point[1])] for point in exterior_coords]
+        points_lists.append(vertex_list)
+    elapsed = time.perf_counter() - start_time
+    print(f"[timer] _shapely_polygons_to_points_lists: {elapsed:.4f} s")
+    return points_lists
+
+
+def _points_lists_to_shapely_polys(points_lists):
+    """
+    Convert points_lists (list of vertex lists) into a flat list of Shapely Polygons.
+    Each polygon is closed and validated (invalid ones are fixed with buffer(0)).
+    A region = one Shapely Polygon (no overlaps). After buffer(0) one input can become
+    several valid polygons; we flatten them into the result list.
+    Approach: loop through each vertex list, close the ring if needed, build a Shapely
+    polygon; fix invalid ones with buffer(0), then collect every resulting polygon piece.
+    """
+    shapely_polygons = []
+    for vertex_list in points_lists:
+        if len(vertex_list) < 3:
+            continue
+        # Close the ring if the first and last point differ.
+        if vertex_list[0] != vertex_list[-1]:
+            vertex_list = list(vertex_list) + [vertex_list[0]]
+        try:
+            polygon = ShapelyPolygon(vertex_list)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            # One Shapely poly might become several (e.g. after buffer(0)); flatten them.
+            for polygon_piece in _to_polygon_list(polygon):
+                if not polygon_piece.is_empty and polygon_piece.area > 0:
+                    shapely_polygons.append(polygon_piece)
+        except Exception:
+            continue
+    return shapely_polygons
+
+
+def _build_arrangement(points_lists):
+    """
+    Build the planar arrangement: decompose overlapping polygons into non-overlapping
+    regions (no depth tracking). Returns list of Shapely Polygons or None if no input.
+    A region = one contiguous area that belongs to exactly one “layer” of the arrangement
+    (no overlaps); we don’t track how many shapes cover it. Used by fracture().
+    Approach: start with the first polygon as initial regions; for each later polygon we
+    split every existing region into “outside this polygon” and “inside this polygon”,
+    then add the part of the new polygon not yet covered by any region. Repeat until
+    all input polygons are processed.
+    """
+    start_time = time.perf_counter()
+    shapely_polys = _points_lists_to_shapely_polys(points_lists)
+    if not shapely_polys:
+        return None
+
+    # Regions = list of non-overlapping Shapely Polygons. Start with the first input polygon.
+    regions = [
+        region for region in _to_polygon_list(shapely_polys[0])
+        if region.area > _MIN_REGION_AREA
+    ]
+
+    for current_polygon in shapely_polys[1:]:
+        new_regions = []
+        for region in regions:
+            # Region outside current polygon: keep as-is (difference).
+            new_regions.extend(
+                piece for piece in _to_polygon_list(region.difference(current_polygon))
+                if not piece.is_empty and piece.area > _MIN_REGION_AREA
+            )
+            # Region inside current polygon: intersection.
+            new_regions.extend(
+                piece for piece in _to_polygon_list(region.intersection(current_polygon))
+                if not piece.is_empty and piece.area > _MIN_REGION_AREA
+            )
+        # Part of current polygon not yet covered by any region: add as new regions.
+        union_existing = unary_union(regions)
+        uncovered_part = current_polygon.difference(union_existing)
+        new_regions.extend(
+            piece for piece in _to_polygon_list(uncovered_part)
+            if not piece.is_empty and piece.area > _MIN_REGION_AREA
+        )
+        regions = new_regions
+
+    elapsed = time.perf_counter() - start_time
+    print(f"[timer] _build_arrangement: {elapsed:.4f} s")
+    return regions
+
+
+def _build_arrangement_with_depths(points_lists):
+    """
+    Build the planar arrangement of all input polygons and track depth per region.
+    A region = one contiguous non-overlapping polygon. Depth = how many input shapes
+    cover that region (1 = one shape, 2 = two overlap, etc.). Overlaps = depth - 1.
+
+    Algorithm:
+    - Start with the first polygon as a single region at depth 1 (one shape covers it).
+    - For each additional polygon P: split every existing region R into
+      (R outside P) and (R inside P). Outside keeps same depth; inside gets depth+1.
+      Then add the part of P that is not yet covered by any region, at depth 1.
+    - No point-in-polygon tests: depth is computed during the split, O(1) per region.
+
+    Returns (regions, depths) or (None, None) if no valid input.
+    """
+    start_time = time.perf_counter()
+    shapely_polys = _points_lists_to_shapely_polys(points_lists)
+    if not shapely_polys:
+        return None, None
+
+    # First polygon: all of it is one region at depth 1.
+    regions = _to_polygon_list(shapely_polys[0])
+    depths = [1] * len(regions)
+
+    # Filter by minimum area (keep regions and depths in sync).
+    regions, depths = zip(*[
+        (region, depth) for region, depth in zip(regions, depths)
+        if region.area > _MIN_REGION_AREA
+    ])
+    regions = list(regions)
+    depths = list(depths)
+
+    # Add each subsequent polygon: split existing regions and assign depths.
+    for polygon_index in range(1, len(shapely_polys)):
+        current_polygon = shapely_polys[polygon_index]
+        new_regions = []
+        new_depths = []
+
+        for existing_region, region_depth in zip(regions, depths):
+            # Part of existing_region outside current_polygon: same depth (not covered by P).
+            difference_parts = existing_region.difference(current_polygon)
+            for piece in _to_polygon_list(difference_parts):
+                if not piece.is_empty and piece.area > _MIN_REGION_AREA:
+                    new_regions.append(piece)
+                    new_depths.append(region_depth)
+            # Part of existing_region inside current_polygon: depth increases by one.
+            intersection_parts = existing_region.intersection(current_polygon)
+            for piece in _to_polygon_list(intersection_parts):
+                if not piece.is_empty and piece.area > _MIN_REGION_AREA:
+                    new_regions.append(piece)
+                    new_depths.append(region_depth + 1)
+
+        # Part of current polygon not yet covered by any region: depth 1 (only this shape).
+        union_existing = unary_union(regions)
+        uncovered_part = current_polygon.difference(union_existing)
+        for piece in _to_polygon_list(uncovered_part):
+            if not piece.is_empty and piece.area > _MIN_REGION_AREA:
+                new_regions.append(piece)
+                new_depths.append(1)
+
+        regions = new_regions
+        depths = new_depths
+
+    elapsed = time.perf_counter() - start_time
+    print(f"[timer] _build_arrangement_with_depths: {elapsed:.4f} s")
+    return regions, depths
+
+
+def _draw_regions(drawing: svgwrite.Drawing, regions) -> None:
+    """
+    Clear the drawing and add one polygon path per region (exterior ring only).
+    A region = one Shapely Polygon; we draw its boundary as an SVG polygon.
+    Approach: clear existing elements, then loop through each region, get its
+    exterior coordinates, close the ring if needed, and add a polygon to the drawing.
+    """
+    start_time = time.perf_counter()
+    drawing.elements.clear()
+    for region_polygon in regions:
+        ring = region_polygon.exterior
+        if ring is None:
+            continue
+        coords = list(ring.coords)
+        if len(coords) < 3:
+            continue
+        if coords[0] != coords[-1]:
+            coords.append(coords[0])
+        points = [[float(coord[0]), float(coord[1])] for coord in coords]
+        drawing.add(drawing.polygon(points))
+    elapsed = time.perf_counter() - start_time
+    print(f"[timer] _draw_regions: {elapsed:.4f} s")
+
+
+def fracture(
+    drawing: svgwrite.Drawing, polygons=None
+) -> svgwrite.Drawing:
+    """
+    Fracture: decompose overlapping polygons into non-overlapping regions
+    and draw each region as a separate path (adjacent edges, no overlaps).
+    Same as Inkscape's Path > Fracture.
+    A region = one contiguous non-overlapping polygon in the arrangement.
+    Approach: get polygon vertex lists (from argument or from the drawing), build the
+    planar arrangement with _build_arrangement(), then draw each region as one SVG path.
+    Either pass a list of Shapely Polygons (e.g. grid.get_shapely_polygons())
+    or leave polygons=None to extract polygons from the drawing. Modifies the drawing in place.
+    """
+    if not SHAPELY_AVAILABLE:
+        raise ImportError("fracture requires Shapely: pip install shapely")
+
+    start_time = time.perf_counter()
+    if polygons is not None:
+        points_lists = _shapely_polygons_to_points_lists(polygons)
+    else:
+        points_lists = _polygon_points_from_drawing(drawing)
+    if not points_lists:
+        return drawing
+
+    regions = _build_arrangement(points_lists)
+    if not regions:
+        return drawing
+
+    _draw_regions(drawing, regions)
+    elapsed = time.perf_counter() - start_time
+    print(f"[timer] fracture (total): {elapsed:.4f} s")
+    return drawing
+
+
+def symmetric_difference(
+    drawing: svgwrite.Drawing, polygons=None
+) -> svgwrite.Drawing:
+    """
+    Symmetric difference (XOR) fill: keep regions with an *even* number of overlaps (0, 2, 4...),
+    drop regions with odd overlaps (1, 3, 5...). Equivalent to the boolean symmetric_difference
+    of the input polygons (region is kept iff it lies in an odd number of inputs).
+    A region = one contiguous polygon; we keep those in an odd number of input shapes.
+    Overlaps = (number of shapes covering the region) - 1. E.g. two overlapping hexagons:
+    outer parts (0 overlaps) kept; inner overlap (1 overlap) not drawn.
+    Approach: get polygon lists, convert to Shapely, then iteratively apply symmetric_difference
+    (poly0 XOR poly1 XOR poly2 ...); flatten the result to regions and draw them.
+    Either pass a list of Shapely Polygons (e.g. grid.get_shapely_polygons())
+    or leave polygons=None to extract from the drawing. Modifies the drawing in place.
+    """
+    if not SHAPELY_AVAILABLE:
+        raise ImportError("symmetric_difference requires Shapely: pip install shapely")
+
+    start_time = time.perf_counter()
+
+    t0 = time.perf_counter()
+    if polygons is not None:
+        points_lists = _shapely_polygons_to_points_lists(polygons)
+    else:
+        points_lists = _polygon_points_from_drawing(drawing)
+    print(f"[timer] symmetric_difference — get points_lists: {time.perf_counter() - t0:.4f} s")
+
+    if not points_lists:
+        return drawing
+
+    t0 = time.perf_counter()
+    shapely_polys = _points_lists_to_shapely_polys(points_lists)
+    print(f"[timer] symmetric_difference — points_lists → Shapely polys: {time.perf_counter() - t0:.4f} s")
+
+    if not shapely_polys:
+        return drawing
+
+    t0 = time.perf_counter()
+    result = symmetric_difference_all(shapely_polys)
+    print(f"[timer] symmetric_difference — symmetric_difference_all(geoms): {time.perf_counter() - t0:.4f} s")
+
+    t0 = time.perf_counter()
+    regions = [
+        region for region in _to_polygon_list(result)
+        if not region.is_empty and region.area > _MIN_REGION_AREA
+    ]
+    print(f"[timer] symmetric_difference — result → regions list: {time.perf_counter() - t0:.4f} s")
+
+    t0 = time.perf_counter()
+    _draw_regions(drawing, regions)
+    print(f"[timer] symmetric_difference — _draw_regions: {time.perf_counter() - t0:.4f} s")
+
+    print(f"[timer] symmetric_difference (total): {time.perf_counter() - start_time:.4f} s")
+    return drawing
