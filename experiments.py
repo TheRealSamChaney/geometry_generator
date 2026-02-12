@@ -73,15 +73,40 @@ import svgwrite
 # hexagon_radius = 40
 # hex1 = Polygon(6, hexagon_radius, [60, 80], drawing_global, 0)
 # hex2 = Polygon(6, hexagon_radius, [100, 80], drawing_global, 0)
-# symmetric_difference(drawing_global, polygons=[hex1.shapely_polygon, hex2.shapely_polygon])
+# hex1.draw()
+# hex2.draw()
+# symmetric_difference_parallel(drawing_global, keep_even=True)
+# # symmetric_difference_parallel(drawing_global, keep_even=False)
+
+# # symmetric_difference(drawing_global)
+# # symmetric_difference(drawing_global, polygons=[hex1.shapely_polygon, hex2.shapely_polygon])
 # drawing_global.save()
 
-# --- EdgeMandala: pentagon seed, 3 layers (each layer = polygons on outer edges of previous) ---
-seed_pentagon = Polygon(5, 30, [200, 200], drawing_global, 0)
+# # --- EdgeMandala: pentagon seed, 3 layers (each layer = polygons on outer edges of previous) ---
+# seed_pentagon = Polygon(5, 30, [200, 200], drawing_global, 0)
+# edge_mandala = EdgeMandala(seed_pentagon)
+# edge_mandala.generate_outer_layer(4)
+# edge_mandala.generate_outer_layer(5)
+# edge_mandala.generate_layers([5, 5, 5, 5])
+# edge_mandala.modify_polygons(ripple_morph, magnitude=0.3, num_waves=3, decrease_out=True)
+# # draw_polygons() draws the modified polygons (ripple applied); draw_layers() would draw the raw edge shapes only
+# edge_mandala.draw_polygons()
+# # symmetric_difference_parallel(drawing_global)
+# drawing_global.save()
+
+# --- EdgeMandala: hexagon seed
+seed_pentagon = Polygon(6, 30, [200, 200], drawing_global, 0)
 edge_mandala = EdgeMandala(seed_pentagon)
-edge_mandala.generate_outer_layer(4)
+edge_mandala.generate_layers([5,5])
 edge_mandala.generate_outer_layer(5)
-edge_mandala.generate_layers([5, 5, 5, 5])
+edge_mandala.generate_layers([5,5])
+edge_mandala.generate_outer_layer(5)
+edge_mandala.generate_layers([5,5])
+
 edge_mandala.draw_layers()
-symmetric_difference_parallel(drawing_global)
+# symmetric_difference_parallel(drawing_global, keep_even=False)
+symmetric_difference_parallel(drawing_global, keep_even=True)
+# symmetric_difference(drawing_global, keep_even=False)
+# symmetric_difference(drawing_global, keep_even=True)
+
 drawing_global.save()

@@ -6,27 +6,28 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.ops import unary_union
+from shapely.errors import GEOSException
 try:
-    from shapely.geometry import Polygon as ShapelyPolygon
-    from shapely.ops import unary_union
-    try:
-        from shapely import symmetric_difference_all
-    except ImportError:
-        symmetric_difference_all = None
-    SHAPELY_AVAILABLE = True
+    # Optional API (depends on Shapely version).
+    from shapely import symmetric_difference_all
 except ImportError:
-    SHAPELY_AVAILABLE = False
     symmetric_difference_all = None
 
 # This will be a SVG geometric pattern creator app
 
-width = 100
+width = 400
 height = 400
- 
+
 output_folder = os.path.dirname(os.path.abspath(__file__))
 output_filename = "geometry_generator_output.svg"
 output_path = os.path.join(output_folder, output_filename)
-drawing_global = svgwrite.Drawing(output_path)
+drawing_global = svgwrite.Drawing(
+    output_path,
+    size=(f"{width}px", f"{height}px"),
+    viewBox=f"0 0 {width} {height}",
+)
 
 class Polygon:
     def __init__(self,  num_points, radius=5, center=[0,0], drawing=drawing_global, angle=0):
@@ -397,15 +398,45 @@ def _canonical_edge(p1, p2, ndigits=6):
     return (min(a, b), max(a, b))
 
 
+def _centroid_of_vertices(vertices):
+    """Return [cx, cy] for the centroid of a vertex list."""
+    if not vertices:
+        return None
+    n = len(vertices)
+    cx = sum(p[0] for p in vertices) / n
+    cy = sum(p[1] for p in vertices) / n
+    return [cx, cy]
+
+
+def _polygon_from_vertices(vertices, num_points, drawing):
+    """Build a Polygon at the centroid of the vertex list with radius = mean distance to centroid (for modify_polygons)."""
+    if len(vertices) < 3 or drawing is None:
+        return None
+    cx = sum(p[0] for p in vertices) / len(vertices)
+    cy = sum(p[1] for p in vertices) / len(vertices)
+    radii = [math.sqrt((p[0] - cx) ** 2 + (p[1] - cy) ** 2) for p in vertices]
+    radius = sum(radii) / len(radii) if radii else 0
+    return Polygon(num_points, radius, [cx, cy], drawing, 0)
+
+
 class EdgeMandala:
     """
     Builds layers of polygons: each new layer has one polygon per *outer* edge of
     the previous layer. The new polygon shares that edge (same two vertices) and
     is placed on the outside (away from the mandala center).
+    Layers store the actual generated shapes (vertex lists; layer 0 is the seed Polygon).
+    A separate grid (2D list of [x,y] points) holds the center of every polygon so you
+    can draw other polygons at those points (e.g. draw_polygons_at_grid) and optionally
+    make them face the mandala center.
     """
     def __init__(self, seed_polygon):
         self._seed_polygon = seed_polygon
+        self.drawing = getattr(seed_polygon, "drawing", None)
         self.layers = [[self.seed_polygon]]
+        # Grid of center points: grid[layer_i][poly_j] = [x, y] center of that polygon.
+        self.grid = [[list(self.seed_polygon.center)]]
+        # Polygon object per cell (for modify_polygons); same shape as grid/layers.
+        self.polygons = [[self.seed_polygon]]
 
     def generate_edge_polygon(self, edge, num_points, interior_point=None):
         start, end = edge[0], edge[1]
@@ -444,11 +475,28 @@ class EdgeMandala:
         if not outer_edges:
             return
         n_pts = num_points if num_points is not None else self.seed_polygon.num_points
+        center = self.center()
         new_layer = []
+        new_grid_row = []
+        new_polygons_row = []
         for (start, end) in outer_edges:
             vertices = self.generate_edge_polygon((start, end), n_pts, interior_point=interior_point)
             new_layer.append(vertices)
+            pt = _centroid_of_vertices(vertices)
+            if pt is not None:
+                new_grid_row.append(pt)
+            poly = _polygon_from_vertices(vertices, n_pts, self.drawing)
+            if poly is not None:
+                # Default: one edge faces the mandala center (angle so edge midpoint points at center).
+                poly.angle = (
+                    math.degrees(math.atan2(center[1] - poly.center[1], center[0] - poly.center[0]))
+                    + 90
+                    - 180 / n_pts
+                )
+                new_polygons_row.append(poly)
         self.layers.append(new_layer)
+        self.grid.append(new_grid_row)
+        self.polygons.append(new_polygons_row)
 
     def generate_outer_layer(self, num_points=None):
         """
@@ -483,11 +531,28 @@ class EdgeMandala:
         if not outermost:
             return
         n_pts = num_points if num_points is not None else self.seed_polygon.num_points
+        center = self.center()
         new_layer = []
+        new_grid_row = []
+        new_polygons_row = []
         for (start, end) in outermost:
             vertices = self.generate_edge_polygon((start, end), n_pts, interior_point=interior_point)
             new_layer.append(vertices)
+            pt = _centroid_of_vertices(vertices)
+            if pt is not None:
+                new_grid_row.append(pt)
+            poly = _polygon_from_vertices(vertices, n_pts, self.drawing)
+            if poly is not None:
+                # Default: one edge faces the mandala center.
+                poly.angle = (
+                    math.degrees(math.atan2(center[1] - poly.center[1], center[0] - poly.center[0]))
+                    + 90
+                    - 180 / n_pts
+                )
+                new_polygons_row.append(poly)
         self.layers.append(new_layer)
+        self.grid.append(new_grid_row)
+        self.polygons.append(new_polygons_row)
 
     def generate_layers(self, n_or_num_points):
         """
@@ -503,9 +568,66 @@ class EdgeMandala:
             for _ in range(n_or_num_points):
                 self.generate_layer()
 
+    def center(self):
+        """Return the mandala center [x, y] (seed polygon center)."""
+        return list(self.seed_polygon.center)
+
+    def center_polygon(self):
+        """Return the polygon at the center (seed, layer 0). For use with morphs like ripple_morph."""
+        return self.polygons[0][0]
+
+    def max_distance(self, origin_point):
+        """Max distance from origin_point to any polygon center (for morphs like ripple_morph)."""
+        best = 0.0
+        for row in self.polygons:
+            for polygon in row:
+                d = math.sqrt(
+                    (origin_point[0] - polygon.center[0]) ** 2
+                    + (origin_point[1] - polygon.center[1]) ** 2
+                )
+                if d > best:
+                    best = d
+        return best
+
+    def modify_polygons(self, callback, **kwargs):
+        """Call callback(self, polygon, layer_index, polygon_index, **kwargs) for each polygon (like Mandala/Grid)."""
+        for i, row in enumerate(self.polygons):
+            for j, polygon in enumerate(row):
+                callback(self, polygon, i, j, **kwargs)
+
+    def draw_polygons(self):
+        """Draw each polygon in self.polygons (so modifications from modify_polygons are visible)."""
+        if self.drawing is None:
+            return
+        for row in self.polygons:
+            for polygon in row:
+                self.drawing.add(self.drawing.polygon(polygon.points))
+
+    def draw_polygons_at_grid(self, num_points, radius, drawing=None, face_center=False):
+        """
+        Draw a polygon at every point in self.grid (center of every layer polygon).
+        num_points, radius: shape of each polygon.
+        If face_center is True, rotate each polygon so it faces the mandala center.
+        """
+        drawing = drawing or self.drawing
+        if drawing is None:
+            return
+        center = self.center()
+        cx, cy = center[0], center[1]
+        for row in self.grid:
+            for pt in row:
+                px, py = pt[0], pt[1]
+                if face_center:
+                    angle_rad = math.atan2(cy - py, cx - px)
+                    angle_deg = math.degrees(angle_rad) + 90
+                else:
+                    angle_deg = 0
+                poly = Polygon(num_points, radius, [px, py], drawing, angle_deg)
+                drawing.add(drawing.polygon(poly.points))
+
     def draw_layers(self, drawing=None):
         """Draw all layers to the given drawing (default: seed_polygon's drawing)."""
-        drawing = drawing or getattr(self.seed_polygon, "drawing", None)
+        drawing = drawing or self.drawing
         if drawing is None:
             return
         for layer in self.layers:
@@ -685,6 +807,24 @@ def _polygon_points_from_drawing(drawing: svgwrite.Drawing) -> List[List[List[fl
     return all_polygon_vertices
 
 
+def _ensure_valid_polygons(geometries):
+    """
+    Return a flat list of valid Shapely Polygon(s) for set ops (e.g. symmetric_difference_all).
+    Invalid or non-polygon geoms are fixed with buffer(0) and exploded into polygons.
+    """
+    out = []
+    for geom in geometries:
+        if geom is None or geom.is_empty:
+            continue
+        if not geom.is_valid:
+            geom = geom.buffer(0)
+        for poly in _to_polygon_list(geom):
+            if poly.is_empty or poly.area <= 0:
+                continue
+            out.append(poly)
+    return out
+
+
 def _to_polygon_list(geometry):
     """
     Flatten a Shapely geometry into a list of Polygon(s).
@@ -746,16 +886,13 @@ def _points_lists_to_shapely_polys(points_lists):
         # Close the ring if the first and last point differ.
         if vertex_list[0] != vertex_list[-1]:
             vertex_list = list(vertex_list) + [vertex_list[0]]
-        try:
-            polygon = ShapelyPolygon(vertex_list)
-            if not polygon.is_valid:
-                polygon = polygon.buffer(0)
-            # One Shapely poly might become several (e.g. after buffer(0)); flatten them.
-            for polygon_piece in _to_polygon_list(polygon):
-                if not polygon_piece.is_empty and polygon_piece.area > 0:
-                    shapely_polygons.append(polygon_piece)
-        except Exception:
-            continue
+        polygon = ShapelyPolygon(vertex_list)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        # One Shapely poly might become several (e.g. after buffer(0)); flatten them.
+        for polygon_piece in _to_polygon_list(polygon):
+            if not polygon_piece.is_empty and polygon_piece.area > 0:
+                shapely_polygons.append(polygon_piece)
     return shapely_polygons
 
 
@@ -913,9 +1050,6 @@ def fracture(
     Either pass a list of Shapely Polygons (e.g. grid.get_shapely_polygons())
     or leave polygons=None to extract polygons from the drawing. Modifies the drawing in place.
     """
-    if not SHAPELY_AVAILABLE:
-        raise ImportError("fracture requires Shapely: pip install shapely")
-
     start_time = time.perf_counter()
     if polygons is not None:
         points_lists = _shapely_polygons_to_points_lists(polygons)
@@ -934,6 +1068,28 @@ def fracture(
     return drawing
 
 
+def _safe_symmetric_difference(a, b):
+    """
+    a.symmetric_difference(b) with GEOSException handling: retry after buffer(0) on
+    invalid geometry so iterative XOR can complete on messy input.
+    """
+    try:
+        return a.symmetric_difference(b)
+    except GEOSException:
+        pass
+    a = a.buffer(0) if not a.is_valid or a.is_empty else a
+    b = b.buffer(0) if not b.is_valid or b.is_empty else b
+    if a.is_empty:
+        return b
+    if b.is_empty:
+        return a
+    try:
+        return a.symmetric_difference(b)
+    except GEOSException:
+        pass
+    return a.buffer(0).symmetric_difference(b.buffer(0))
+
+
 def _iterative_symmetric_difference_chunk(polygon_list):
     """
     Worker for parallel symmetric_difference: compute iterative XOR for one chunk of
@@ -945,23 +1101,58 @@ def _iterative_symmetric_difference_chunk(polygon_list):
         return None
     result = polygon_list[0]
     for current_polygon in polygon_list[1:]:
-        result = result.symmetric_difference(current_polygon)
+        result = _safe_symmetric_difference(result, current_polygon)
+        if result is not None and not result.is_empty and not result.is_valid:
+            result = result.buffer(0)
+    return result
+
+
+def _xor_shapely_polygons(shapely_polys, parallel: bool = False):
+    """
+    XOR of a list of Shapely polygons. Tries symmetric_difference_all first;
+    on GEOSException falls back to iterative XOR (sequential or parallel).
+    Returns the result geometry or None if empty/failed.
+    """
+    if not shapely_polys:
+        return None
+    result = None
+    if symmetric_difference_all is not None:
+        try:
+            result = symmetric_difference_all(shapely_polys)
+        except GEOSException:
+            pass
+    if result is None:
+        if parallel:
+            max_workers = min(os.cpu_count() or 4, len(shapely_polys))
+            if max_workers <= 1:
+                result = _iterative_symmetric_difference_chunk(shapely_polys)
+            else:
+                chunks = [
+                    [shapely_polys[i] for i in range(w, len(shapely_polys), max_workers)]
+                    for w in range(max_workers)
+                ]
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    partial_results = list(executor.map(_iterative_symmetric_difference_chunk, chunks))
+                result = None
+                for partial in partial_results:
+                    if partial is not None:
+                        result = partial if result is None else _safe_symmetric_difference(result, partial)
+        else:
+            result = _iterative_symmetric_difference_chunk(shapely_polys)
     return result
 
 
 def symmetric_difference(
-    drawing: svgwrite.Drawing, polygons=None
+    drawing: svgwrite.Drawing, polygons=None, keep_even: bool = False
 ) -> svgwrite.Drawing:
     """
-    Symmetric difference (XOR) fill: keep regions in an odd number of input shapes.
-    Uses Shapely's symmetric_difference_all(geometries) when available (one batch op);
-    otherwise falls back to sequential iterative XOR.
+    Symmetric difference fill: by default keep regions in an *odd* number of input shapes (XOR).
+    Set keep_even=True to keep regions in an *even* number (0, 2, 4...) instead.
+    Uses Shapely's symmetric_difference_all when available, else sequential XOR (when keep_even=False);
+    when keep_even=True uses arrangement-with-depths and keeps depth % 2 == 0.
     Either pass a list of Shapely Polygons (e.g. grid.get_shapely_polygons())
     or leave polygons=None to extract from the drawing. Modifies the drawing in place.
     """
-    if not SHAPELY_AVAILABLE:
-        raise ImportError("symmetric_difference requires Shapely: pip install shapely")
-
     start_time = time.perf_counter()
 
     t0 = time.perf_counter()
@@ -982,21 +1173,26 @@ def symmetric_difference(
         return drawing
 
     t0 = time.perf_counter()
-    if symmetric_difference_all is not None:
-        result = symmetric_difference_all(shapely_polys)
+    if keep_even:
+        regions_list, depths_list = _build_arrangement_with_depths(points_lists)
+        if regions_list is None or depths_list is None:
+            return drawing
+        regions = [
+            region for region, depth in zip(regions_list, depths_list)
+            if depth % 2 == 0 and not region.is_empty and region.area > _MIN_REGION_AREA
+        ]
     else:
-        result = _iterative_symmetric_difference_chunk(shapely_polys)
-    print(f"[timer] symmetric_difference — XOR (batch or sequential): {time.perf_counter() - t0:.4f} s")
-
-    if result is None or (hasattr(result, "is_empty") and result.is_empty):
-        return drawing
-
-    t0 = time.perf_counter()
-    regions = [
-        region for region in _to_polygon_list(result)
-        if not region.is_empty and region.area > _MIN_REGION_AREA
-    ]
-    print(f"[timer] symmetric_difference — result → regions list: {time.perf_counter() - t0:.4f} s")
+        shapely_polys = _ensure_valid_polygons(shapely_polys)
+        if not shapely_polys:
+            return drawing
+        result = _xor_shapely_polygons(shapely_polys, parallel=False)
+        if result is None or (hasattr(result, "is_empty") and result.is_empty):
+            return drawing
+        regions = [
+            region for region in _to_polygon_list(result)
+            if not region.is_empty and region.area > _MIN_REGION_AREA
+        ]
+    print(f"[timer] symmetric_difference — regions (keep_even={keep_even}): {time.perf_counter() - t0:.4f} s")
 
     t0 = time.perf_counter()
     _draw_regions(drawing, regions)
@@ -1007,18 +1203,13 @@ def symmetric_difference(
 
 
 def symmetric_difference_parallel(
-    drawing: svgwrite.Drawing, polygons=None
+    drawing: svgwrite.Drawing, polygons=None, keep_even: bool = False
 ) -> svgwrite.Drawing:
     """
-    Same as symmetric_difference (XOR fill) but uses parallel iterative XOR: chunk polygons
-    across threads, each thread does iterative symmetric_difference on its chunk, then the
-    main thread combines partial results. Uses threads (not processes) so callers do not need
-    if __name__ == '__main__'. GEOS typically releases the GIL during work, so threads can run in parallel.
-    Same signature as symmetric_difference; modifies the drawing in place.
+    XOR of all input polygons; result is drawn (odd-coverage regions).
+    keep_even=True: prepend a large bounding square so XOR gives even-coverage regions instead.
+    Uses Shapely symmetric_difference_all when available, else parallel iterative XOR.
     """
-    if not SHAPELY_AVAILABLE:
-        raise ImportError("symmetric_difference_parallel requires Shapely: pip install shapely")
-
     start_time = time.perf_counter()
 
     t0 = time.perf_counter()
@@ -1038,32 +1229,31 @@ def symmetric_difference_parallel(
     if not shapely_polys:
         return drawing
 
-    t0 = time.perf_counter()
-    max_workers = min(os.cpu_count() or 4, len(shapely_polys))
-    if max_workers <= 1:
-        result = _iterative_symmetric_difference_chunk(shapely_polys)
-    else:
-        chunks = [
-            [shapely_polys[index] for index in range(worker_index, len(shapely_polys), max_workers)]
-            for worker_index in range(max_workers)
-        ]
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            partial_results = list(executor.map(_iterative_symmetric_difference_chunk, chunks))
-        result = None
-        for partial in partial_results:
-            if partial is not None:
-                result = partial if result is None else result.symmetric_difference(partial)
-    print(f"[timer] symmetric_difference_parallel — parallel iterative XOR: {time.perf_counter() - t0:.4f} s")
+    # When keep_even, add one big square around everything so XOR yields even-coverage regions.
+    if keep_even:
+        union_all = unary_union(shapely_polys)
+        minx, miny, maxx, maxy = union_all.bounds
+        pad = max(maxx - minx, maxy - miny) * 0.1 or 1.0
+        wrapper = ShapelyPolygon([
+            (minx - pad, miny - pad), (maxx + pad, miny - pad),
+            (maxx + pad, maxy + pad), (minx - pad, maxy + pad),
+        ])
+        shapely_polys = list(shapely_polys) + [wrapper]
 
-    if result is None:
+    # GEOS can raise TopologyException on invalid or sliver geometry; normalize before set op.
+    shapely_polys = _ensure_valid_polygons(shapely_polys)
+    if not shapely_polys:
         return drawing
 
     t0 = time.perf_counter()
+    result = _xor_shapely_polygons(shapely_polys, parallel=True)
+    if result is None or (hasattr(result, "is_empty") and result.is_empty):
+        return drawing
     regions = [
-        region for region in _to_polygon_list(result)
-        if not region.is_empty and region.area > _MIN_REGION_AREA
+        r for r in _to_polygon_list(result)
+        if not r.is_empty and r.area > _MIN_REGION_AREA
     ]
-    print(f"[timer] symmetric_difference_parallel — result → regions list: {time.perf_counter() - t0:.4f} s")
+    print(f"[timer] symmetric_difference_parallel — regions (keep_even={keep_even}): {time.perf_counter() - t0:.4f} s")
 
     t0 = time.perf_counter()
     _draw_regions(drawing, regions)
