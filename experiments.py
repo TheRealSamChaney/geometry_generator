@@ -75,7 +75,7 @@ import svgwrite
 # hex2 = Polygon(6, hexagon_radius, [100, 80], drawing_global, 0)
 # hex1.draw()
 # hex2.draw()
-# symmetric_difference_parallel(drawing_global, keep_even=True)
+# # symmetric_difference_parallel(drawing_global, keep_even=False)
 # # symmetric_difference_parallel(drawing_global, keep_even=False)
 
 # # symmetric_difference(drawing_global)
@@ -91,11 +91,11 @@ import svgwrite
 # edge_mandala.modify_polygons(ripple_morph, magnitude=0.3, num_waves=3, decrease_out=True)
 # # draw_polygons() draws the modified polygons (ripple applied); draw_layers() would draw the raw edge shapes only
 # edge_mandala.draw_polygons()
-# # symmetric_difference_parallel(drawing_global)
+# symmetric_difference_parallel(drawing_global)
 # drawing_global.save()
 
 # --- EdgeMandala: hexagon seed
-seed_pentagon = Polygon(6, 30, [200, 200], drawing_global, 0)
+seed_pentagon = Polygon(5, 30, [200, 200], drawing_global, 0)
 edge_mandala = EdgeMandala(seed_pentagon)
 edge_mandala.generate_layers([5,5])
 edge_mandala.generate_outer_layer(5)
@@ -104,9 +104,12 @@ edge_mandala.generate_outer_layer(5)
 edge_mandala.generate_layers([5,5])
 
 edge_mandala.draw_layers()
-# symmetric_difference_parallel(drawing_global, keep_even=False)
-symmetric_difference_parallel(drawing_global, keep_even=True)
+symmetric_difference_parallel(drawing_global, keep_even=False)
+# symmetric_difference_parallel(drawing_global, keep_even=True)
 # symmetric_difference(drawing_global, keep_even=False)
 # symmetric_difference(drawing_global, keep_even=True)
+
+# Clean small shapes
+clean_small_shapes(5)
 
 drawing_global.save()

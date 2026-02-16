@@ -1261,3 +1261,29 @@ def symmetric_difference_parallel(
 
     print(f"[timer] symmetric_difference_parallel (total): {time.perf_counter() - start_time:.4f} s")
     return drawing
+
+
+def clean_small_shapes(relative_area: float) -> svgwrite.Drawing:
+    """
+    Remove shapes whose area is below the given percent of the largest shape's area.
+    relative_area in [0, 100]: keep only shapes with area >= (relative_area/100) * max_area.
+    - 0: keep all shapes.
+    - 100: keep only the largest shape(s); everything else is removed.
+    Modifies the global drawing in place.
+    """
+    drawing = drawing_global
+    if not (0 <= relative_area <= 100):
+        raise ValueError("relative_area must be between 0 and 100 (inclusive)")
+    points_lists = _polygon_points_from_drawing(drawing)
+    if not points_lists:
+        return drawing
+    shapely_polys = _points_lists_to_shapely_polys(points_lists)
+    if not shapely_polys:
+        return drawing
+    max_area = max(p.area for p in shapely_polys)
+    if max_area <= 0:
+        return drawing
+    threshold = (relative_area / 100.0) * max_area
+    kept = [p for p in shapely_polys if p.area >= threshold]
+    _draw_regions(drawing, kept)
+    return drawing
